@@ -103,6 +103,8 @@ import com.netflix.titus.runtime.endpoint.authorization.AuthorizationStatus;
 import com.netflix.titus.runtime.endpoint.metadata.CallMetadataResolver;
 import com.netflix.titus.runtime.endpoint.metadata.CallMetadataUtils;
 import com.netflix.titus.runtime.endpoint.v3.grpc.GrpcJobManagementModelConverters;
+import com.netflix.titus.runtime.endpoint.v3.grpc.GrpcObjectsCache;
+import com.netflix.titus.runtime.endpoint.v3.grpc.GrpcObjectsCacheConfiguration;
 import com.netflix.titus.runtime.endpoint.v3.grpc.query.V3JobQueryCriteriaEvaluator;
 import com.netflix.titus.runtime.endpoint.v3.grpc.query.V3TaskQueryCriteriaEvaluator;
 import com.netflix.titus.runtime.jobmanager.JobManagerCursors;
@@ -152,6 +154,7 @@ public class DefaultJobManagementServiceGrpc extends JobManagementServiceGrpc.Jo
     private final TitusRuntime titusRuntime;
     private final SchedulingService<? extends TaskRequest> schedulingService;
     private final Scheduler observeJobsScheduler;
+    private final GrpcObjectsCache grpcObjectsCache;
 
     @Inject
     public DefaultJobManagementServiceGrpc(GrpcMasterEndpointConfiguration configuration,
@@ -167,7 +170,8 @@ public class DefaultJobManagementServiceGrpc extends JobManagementServiceGrpc.Jo
                                            CellInfoResolver cellInfoResolver,
                                            AuthorizationService authorizationService,
                                            TitusRuntime titusRuntime,
-                                           SchedulingService<? extends TaskRequest> schedulingService) {
+                                           SchedulingService<? extends TaskRequest> schedulingService,
+                                           GrpcObjectsCacheConfiguration grpcObjectsCacheConfiguration) {
         this.configuration = configuration;
         this.agentManagementService = agentManagementService;
         this.capacityGroupService = capacityGroupService;
@@ -184,6 +188,8 @@ public class DefaultJobManagementServiceGrpc extends JobManagementServiceGrpc.Jo
         this.schedulingService = schedulingService;
         this.observeJobsScheduler = Schedulers.from(ExecutorsExt.instrumentedFixedSizeThreadPool(
                 titusRuntime.getRegistry(), "observeJobs", configuration.getServerStreamsThreadPoolSize()));
+
+        grpcObjectsCache = new GrpcObjectsCache(jobOperations, titusRuntime, grpcObjectsCacheConfiguration, logStorageInfo);
     }
 
     @Override
@@ -256,7 +262,7 @@ public class DefaultJobManagementServiceGrpc extends JobManagementServiceGrpc.Jo
                     JobManagerCursors::coreJobIndexOf,
                     JobManagerCursors::newCoreCursorFrom
             );
-            List<Job> grpcJobs = queryResult.getLeft().stream().map(GrpcJobManagementModelConverters::toGrpcJob).collect(Collectors.toList());
+            List<Job> grpcJobs = queryResult.getLeft().stream().map(grpcObjectsCache::getJob).collect(Collectors.toList());
 
             JobQueryResult grpcQueryResult;
             if (jobQuery.getFieldsList().isEmpty()) {
@@ -280,7 +286,7 @@ public class DefaultJobManagementServiceGrpc extends JobManagementServiceGrpc.Jo
 
         try {
             jobOperations.getJob(id)
-                    .map(j -> Observable.just(GrpcJobManagementModelConverters.toGrpcJob(j)))
+                    .map(j -> Observable.just(grpcObjectsCache.getJob(j)))
                     .orElseGet(() -> Observable.error(JobManagerException.jobNotFound(id)))
                     .subscribe(
                             responseObserver::onNext,
